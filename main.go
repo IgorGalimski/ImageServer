@@ -47,15 +47,15 @@ func uploadImage(c *gin.Context) {
 		return
 	}
 
-	f, err := os.Open(fileName)
+	f, err := os.Open(fullPathToFile)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("Error opening file: %s", err.Error()))
 		return
 	}
 	defer f.Close()
 
-	userId, err := c.FormFile("userId")
-	if err != nil {
+	userId := c.PostForm("userId")
+	if userId == "" {
 		c.String(http.StatusBadRequest, fmt.Sprintf("Error getting user id: %s", err.Error()))
 		return
 	}
