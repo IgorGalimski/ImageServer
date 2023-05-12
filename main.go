@@ -19,6 +19,7 @@ func main() {
 
 	r.POST("/upload", uploadImage)
 	r.GET("/get", getImages)
+	r.DELETE("/delete", deleteImages)
 
 	r.GET("/", ping)
 
@@ -141,6 +142,63 @@ func getImages(c *gin.Context) {
 		"user":  userId,
 		"files": files,
 	})
+}
+
+func deleteImages(c *gin.Context) {
+	userId := c.PostForm("userId")
+	if userId == "" {
+		c.String(http.StatusBadRequest, "Error getting user id")
+		return
+	}
+
+	db := getDB()
+	defer db.Close()
+
+	rows, err := db.Query("SELECT fileName FROM images WHERE userId = ?", userId)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error querying database: %s", err.Error()))
+		return
+	}
+	defer rows.Close()
+
+	var filenames []string
+	for rows.Next() {
+		var filename string
+		err := rows.Scan(&filename)
+		if err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+			return
+		}
+		filenames = append(filenames, filename)
+	}
+
+	if err := rows.Err(); err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+		return
+	}
+
+	for _, filename := range filenames {
+		fullPathToFile := fmt.Sprintf("uploads/%s", filename)
+		if err := os.Remove(fullPathToFile); err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting file: %s", err.Error()))
+			return
+		}
+	}
+
+	stmt, err := db.Prepare("DELETE FROM images WHERE userId = ?")
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error preparing database statement: %s", err.Error()))
+		return
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(userId)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting image information from database: %s", err.Error()))
+		return
+	}
+
+	c.String(http.StatusOK, fmt.Sprintf("Deleted %d images for user %s", len(filenames), userId))
 }
 
 func getDB() *sql.DB {
