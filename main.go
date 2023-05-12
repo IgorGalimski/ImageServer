@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ func main() {
 	r := gin.Default()
 
 	r.POST("/upload", uploadImage)
+	r.GET("/get", getImages)
+
 	r.GET("/", ping)
 
 	err := r.Run(":8081")
@@ -80,6 +83,64 @@ func uploadImage(c *gin.Context) {
 	}
 
 	c.String(http.StatusOK, fmt.Sprintf("File %s uploaded successfully", file.Filename))
+}
+
+func getImages(c *gin.Context) {
+	userId := c.PostForm("userId")
+	if userId == "" {
+		c.String(http.StatusBadRequest, "Error getting user id")
+		return
+	}
+
+	db := getDB()
+	defer db.Close()
+
+	rows, err := db.Query("SELECT fileName FROM images WHERE userId = ?", userId)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error querying database: %s", err.Error()))
+		return
+	}
+	defer rows.Close()
+
+	var files []gin.H
+	for rows.Next() {
+		var fileName string
+		err := rows.Scan(&fileName)
+		if err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+			return
+		}
+
+		fullPathToFile := fmt.Sprintf("uploads/%s", fileName)
+
+		f, err := os.Open(fullPathToFile)
+		if err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("Error opening file: %s", err.Error()))
+			return
+		}
+		defer f.Close()
+
+		fileBytes, err := io.ReadAll(f)
+		if err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading file: %s", err.Error()))
+			return
+		}
+
+		files = append(files, gin.H{
+			"filename": fileName,
+			"data":     fileBytes,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user":  userId,
+		"files": files,
+	})
 }
 
 func getDB() *sql.DB {
