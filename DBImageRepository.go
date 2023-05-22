@@ -10,7 +10,7 @@ type DBImageRepository struct {
 	db         *sql.DB
 }
 
-func NewLocalImageRepository(uploadPath string, db *sql.DB) *DBImageRepository {
+func NewDBImageRepository(uploadPath string, db *sql.DB) *DBImageRepository {
 	return &DBImageRepository{
 		uploadPath: uploadPath,
 		db:         db,
