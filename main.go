@@ -77,7 +77,7 @@ func (h *ImageHandler) uploadImage(c *gin.Context) {
 	fileName := generateFileName(file.Filename)
 	fullPathToFile := filepath.Join("uploads", fileName)
 
-	err = saveUploadedFile(c, file, fullPathToFile)
+	err = saveUploadedFile(file, fullPathToFile)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("Error saving file: %s", err.Error()))
 		return
@@ -103,7 +103,7 @@ func generateFileName(originalName string) string {
 	return fmt.Sprintf("%s%s", uuid.New().String(), filepath.Ext(originalName))
 }
 
-func saveUploadedFile(c *gin.Context, file *multipart.FileHeader, fullPath string) error {
+func saveUploadedFile(file *multipart.FileHeader, fullPath string) error {
 	src, err := file.Open()
 	if err != nil {
 		return err
