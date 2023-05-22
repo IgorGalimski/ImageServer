@@ -3,138 +3,149 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"io"
+	"log"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
 )
 
 func main() {
 	r := gin.Default()
 
-	r.POST("/upload", uploadImage)
-	r.GET("/get", getImages)
-	r.DELETE("/delete", deleteImages)
+	db, err := connectToDB()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	r.GET("/", ping)
+	uploadPath := "uploads"
+	err = os.MkdirAll(uploadPath, os.ModePerm)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	err := r.Run(":8081")
+	imageRepo := NewLocalImageRepository(uploadPath, db)
+	imageHandler := NewImageHandler(imageRepo)
+
+	r.POST("/upload", imageHandler.uploadImage)
+	r.GET("/get", imageHandler.getImages)
+	r.DELETE("/delete", imageHandler.deleteImages)
+
+	r.GET("/", pingHandler)
+
+	err = r.Run(":8081")
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func ping(c *gin.Context) {
-	getDB()
+func connectToDB() (*sql.DB, error) {
+	db, err := sql.Open("mysql", "root:password@tcp(127.0.0.1:3306)/images")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
 
+	return db, nil
+}
+
+func pingHandler(c *gin.Context) {
 	c.String(http.StatusOK, "Running!")
 }
 
-func uploadImage(c *gin.Context) {
+type ImageHandler struct {
+	imageRepo ImageRepository
+}
+
+func NewImageHandler(imageRepo ImageRepository) *ImageHandler {
+	return &ImageHandler{
+		imageRepo: imageRepo,
+	}
+}
+
+func (h *ImageHandler) uploadImage(c *gin.Context) {
 	file, err := c.FormFile("image")
 	if err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("Error getting image from user: %s", err.Error()))
 		return
 	}
 
-	fileName := fmt.Sprintf("%s%s", uuid.New().String(), filepath.Ext(file.Filename))
-	fullPathToFile := fmt.Sprintf("uploads/%s", fileName)
+	fileName := generateFileName(file.Filename)
+	fullPathToFile := filepath.Join("uploads", fileName)
 
-	err = c.SaveUploadedFile(file, fullPathToFile)
+	err = saveUploadedFile(c, file, fullPathToFile)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("Error saving file: %s", err.Error()))
 		return
 	}
 
-	f, err := os.Open(fullPathToFile)
-	if err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error opening file: %s", err.Error()))
-		return
-	}
-	defer f.Close()
-
-	userId := c.PostForm("userId")
-	if userId == "" {
-		c.String(http.StatusBadRequest, fmt.Sprintf("Error getting user id: %s", err.Error()))
-		return
-	}
-
-	db := getDB()
-	defer db.Close()
-
-	stmt, err := db.Prepare("INSERT INTO images (fileName, userId) VALUES (?, ?)")
-	if err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error: %s", err.Error()))
-		return
-	}
-	defer stmt.Close()
-
-	_, err = stmt.Exec(fileName, userId)
-	if err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error saving file to database: %s", err.Error()))
-
-		_ = os.Remove(fullPathToFile)
-
-		return
-	}
-
-	c.String(http.StatusOK, fmt.Sprintf("File %s uploaded successfully", file.Filename))
-}
-
-func getImages(c *gin.Context) {
 	userId := c.PostForm("userId")
 	if userId == "" {
 		c.String(http.StatusBadRequest, "Error getting user id")
 		return
 	}
 
-	db := getDB()
-	defer db.Close()
+	err = h.imageRepo.SaveImage(fileName, userId)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error saving file to database: %s", err.Error()))
+		deleteFile(fullPathToFile)
+		return
+	}
 
-	rows, err := db.Query("SELECT fileName FROM images WHERE userId = ?", userId)
+	c.String(http.StatusOK, fmt.Sprintf("File %s uploaded successfully", file.Filename))
+}
+
+func generateFileName(originalName string) string {
+	return fmt.Sprintf("%s%s", uuid.New().String(), filepath.Ext(originalName))
+}
+
+func saveUploadedFile(c *gin.Context, file *multipart.FileHeader, fullPath string) error {
+	src, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(fullPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func deleteFile(path string) {
+	if err := os.Remove(path); err != nil {
+		log.Println("Error deleting file:", err.Error())
+	}
+}
+
+func (h *ImageHandler) getImages(c *gin.Context) {
+	userId := c.PostForm("userId")
+	if userId == "" {
+		c.String(http.StatusBadRequest, "Error getting user id")
+		return
+	}
+
+	filenames, err := h.imageRepo.GetImages(userId)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("Error querying database: %s", err.Error()))
 		return
 	}
-	defer rows.Close()
 
-	var files []gin.H
-	for rows.Next() {
-		var fileName string
-		err := rows.Scan(&fileName)
-		if err != nil {
-			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
-			return
-		}
-
-		fullPathToFile := fmt.Sprintf("uploads/%s", fileName)
-
-		f, err := os.Open(fullPathToFile)
-		if err != nil {
-			c.String(http.StatusInternalServerError, fmt.Sprintf("Error opening file: %s", err.Error()))
-			return
-		}
-		defer f.Close()
-
-		fileBytes, err := io.ReadAll(f)
-		if err != nil {
-			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading file: %s", err.Error()))
-			return
-		}
-
-		files = append(files, gin.H{
-			"filename": fileName,
-			"data":     fileBytes,
-		})
-	}
-
-	if err := rows.Err(); err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+	files, err := readFiles(filenames)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading files: %s", err.Error()))
 		return
 	}
 
@@ -144,67 +155,120 @@ func getImages(c *gin.Context) {
 	})
 }
 
-func deleteImages(c *gin.Context) {
+func readFiles(filenames []string) ([]gin.H, error) {
+	var files []gin.H
+	for _, filename := range filenames {
+		fullPath := filepath.Join("uploads", filename)
+
+		fileBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			return nil, err
+		}
+
+		files = append(files, gin.H{
+			"filename": filename,
+			"data":     fileBytes,
+		})
+	}
+
+	return files, nil
+}
+
+func (h *ImageHandler) deleteImages(c *gin.Context) {
 	userId := c.PostForm("userId")
 	if userId == "" {
 		c.String(http.StatusBadRequest, "Error getting user id")
 		return
 	}
 
-	db := getDB()
-	defer db.Close()
-
-	rows, err := db.Query("SELECT fileName FROM images WHERE userId = ?", userId)
+	filenames, err := h.imageRepo.GetImages(userId)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("Error querying database: %s", err.Error()))
 		return
 	}
-	defer rows.Close()
 
-	var filenames []string
-	for rows.Next() {
-		var filename string
-		err := rows.Scan(&filename)
-		if err != nil {
-			c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
-			return
-		}
-		filenames = append(filenames, filename)
-	}
-
-	if err := rows.Err(); err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error reading database results: %s", err.Error()))
+	err = deleteFiles(filenames)
+	if err != nil {
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting files: %s", err.Error()))
 		return
 	}
 
-	for _, filename := range filenames {
-		fullPathToFile := fmt.Sprintf("uploads/%s", filename)
-		if err := os.Remove(fullPathToFile); err != nil {
-			c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting file: %s", err.Error()))
-			return
-		}
-	}
-
-	stmt, err := db.Prepare("DELETE FROM images WHERE userId = ?")
+	err = h.imageRepo.DeleteImages(userId)
 	if err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error preparing database statement: %s", err.Error()))
-		return
-	}
-	defer stmt.Close()
-
-	_, err = stmt.Exec(userId)
-	if err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting image information from database: %s", err.Error()))
+		c.String(http.StatusInternalServerError, fmt.Sprintf("Error deleting images: %s", err.Error()))
 		return
 	}
 
 	c.String(http.StatusOK, fmt.Sprintf("Deleted %d images for user %s", len(filenames), userId))
 }
 
-func getDB() *sql.DB {
-	db, err := sql.Open("mysql", "root:password@tcp(127.0.0.1:3306)/images")
-	if err != nil {
-		log.Fatal(err)
+func deleteFiles(filenames []string) error {
+	for _, filename := range filenames {
+		fullPath := filepath.Join("uploads", filename)
+		err := os.Remove(fullPath)
+		if err != nil {
+			log.Println("Error deleting file:", err.Error())
+		}
 	}
-	return db
+
+	return nil
+}
+
+func (r *LocalImageRepository) SaveImage(fileName, userID string) error {
+	fullPath := filepath.Join(r.uploadPath, fileName)
+
+	stmt, err := r.db.Prepare("INSERT INTO images (fileName, userId) VALUES (?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(fileName, userID)
+	if err != nil {
+		deleteFile(fullPath)
+		return err
+	}
+
+	return nil
+}
+
+func (r *LocalImageRepository) GetImages(userID string) ([]string, error) {
+	var filenames []string
+
+	rows, err := r.db.Query("SELECT fileName FROM images WHERE userId = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var filename string
+		err := rows.Scan(&filename)
+		if err != nil {
+			return nil, err
+		}
+
+		filenames = append(filenames, filename)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return filenames, nil
+}
+
+func (r *LocalImageRepository) DeleteImages(userID string) error {
+	stmt, err := r.db.Prepare("DELETE FROM images WHERE userId = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(userID)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
